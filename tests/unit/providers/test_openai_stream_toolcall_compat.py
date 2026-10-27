@@ -169,3 +169,68 @@ def test_sanitize_tool_call_normalizes_non_string_arguments() -> None:
     assert sanitized_missing_name_and_arguments is not None
     assert sanitized_missing_name_and_arguments.function.name == ""
     assert sanitized_missing_name_and_arguments.function.arguments == ""
+
+async def test_stream_parser_handles_delta_with_audio_none() -> None:
+    from openai.types.chat.chat_completion_chunk import ChoiceDelta
+
+    model = CompatHarnessOpenAIChatModel(
+        "dummy",
+        api_key="sk-test",
+        stream=True,
+    )
+
+    # ChoiceDelta in modern openai has audio: Optional[ChoiceDeltaAudio] = None
+    delta = ChoiceDelta(content="你好", role="assistant")
+    assert hasattr(delta, "audio")
+    assert delta.audio is None
+
+    chunk = SimpleNamespace(
+        usage=None,
+        choices=[SimpleNamespace(delta=delta)],
+    )
+
+    stream = FakeAsyncStream([chunk])
+
+    responses = await model.parse_stream_for_test(
+        datetime.now(),
+        stream,
+    )
+
+    assert responses
+    text_blocks = [
+        block["text"]
+        for r in responses
+        for block in getattr(r, "content", [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    assert "你好" in text_blocks
+
+
+async def test_stream_parser_handles_delta_with_audio_object() -> None:
+    model = CompatHarnessOpenAIChatModel(
+        "dummy",
+        api_key="sk-test",
+        stream=True,
+    )
+
+    fake_audio = SimpleNamespace(data="base64audio", transcript="voice text")
+    delta = SimpleNamespace(
+        content=None,
+        role="assistant",
+        audio=fake_audio,
+        tool_calls=None,
+    )
+
+    chunk = SimpleNamespace(
+        usage=None,
+        choices=[SimpleNamespace(delta=delta)],
+    )
+
+    stream = FakeAsyncStream([chunk])
+
+    responses = await model.parse_stream_for_test(
+        datetime.now(),
+        stream,
+    )
+
+    assert responses

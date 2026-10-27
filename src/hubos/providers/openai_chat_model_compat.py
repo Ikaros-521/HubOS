@@ -74,9 +74,16 @@ def _safe_glm_max_tokens(
     return min(requested_max_tokens, available_output)
 
 
-def _clone_with_overrides(obj: Any, **overrides: Any) -> Any:
+def _clone_with_overrides(
+    obj: Any,
+    exclude: set[str] | None = None,
+    **overrides: Any,
+) -> Any:
     """Clone a stream object into a mutable namespace with overrides."""
     data = dict(getattr(obj, "__dict__", {}))
+    if exclude:
+        for k in exclude:
+            data.pop(k, None)
     data.update(overrides)
     return SimpleNamespace(**data)
 
@@ -131,7 +138,7 @@ def _sanitize_tool_call(tool_call: Any) -> Any | None:
 
 
 def _sanitize_chunk(chunk: Any) -> Any:
-    """Drop/normalize malformed tool-calls in a streaming chunk."""
+    """Drop/normalize malformed tool-calls and incompatible delta fields in a streaming chunk."""
     choices = getattr(chunk, "choices", None)
     if not choices:
         return chunk
@@ -145,25 +152,44 @@ def _sanitize_chunk(chunk: Any) -> Any:
             sanitized_choices.append(choice)
             continue
 
-        raw_tool_calls = getattr(delta, "tool_calls", None)
-        if not raw_tool_calls:
-            sanitized_choices.append(choice)
-            continue
-
         choice_changed = False
-        sanitized_tool_calls: list[Any] = []
-        for tool_call in raw_tool_calls:
-            sanitized = _sanitize_tool_call(tool_call)
-            if sanitized is not tool_call:
+        delta_overrides: dict[str, Any] = {}
+        delta_exclude: set[str] = set()
+
+        raw_tool_calls = getattr(delta, "tool_calls", None)
+        if raw_tool_calls:
+            sanitized_tool_calls: list[Any] = []
+            for tool_call in raw_tool_calls:
+                sanitized = _sanitize_tool_call(tool_call)
+                if sanitized is not tool_call:
+                    choice_changed = True
+                if sanitized is not None:
+                    sanitized_tool_calls.append(sanitized)
+            if choice_changed:
+                delta_overrides["tool_calls"] = sanitized_tool_calls
+
+        # Sanitize audio: agentscope expects `"data" in choice.delta.audio`
+        # which crashes with TypeError if delta.audio is None or a non-iterable object.
+        if hasattr(delta, "audio"):
+            raw_audio = getattr(delta, "audio", None)
+            if raw_audio is None:
                 choice_changed = True
-            if sanitized is not None:
-                sanitized_tool_calls.append(sanitized)
+                delta_exclude.add("audio")
+            elif not isinstance(raw_audio, dict):
+                audio_dict: dict[str, Any] = {}
+                if hasattr(raw_audio, "data") and getattr(raw_audio, "data", None) is not None:
+                    audio_dict["data"] = getattr(raw_audio, "data")
+                if hasattr(raw_audio, "transcript") and getattr(raw_audio, "transcript", None) is not None:
+                    audio_dict["transcript"] = getattr(raw_audio, "transcript")
+                choice_changed = True
+                delta_overrides["audio"] = audio_dict
 
         if choice_changed:
             changed = True
             sanitized_delta = _clone_with_overrides(
                 delta,
-                tool_calls=sanitized_tool_calls,
+                exclude=delta_exclude,
+                **delta_overrides,
             )
             sanitized_choice = _clone_with_overrides(
                 choice,

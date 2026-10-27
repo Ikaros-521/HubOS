@@ -1,7 +1,16 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
 # pylint: disable=line-too-long
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
 import logging
 import os
 import time
@@ -42,7 +51,11 @@ def _file_lock(
     try:
         while True:
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if fcntl is not None:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                elif msvcrt is not None:
+                    os.lseek(lock_fd, 0, os.SEEK_SET)
+                    msvcrt.locking(lock_fd, msvcrt.LK_NBLCK, 1)
                 break
             except (OSError, BlockingIOError):
                 remaining = deadline - time.monotonic()
@@ -56,7 +69,11 @@ def _file_lock(
         yield
     finally:
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                os.lseek(lock_fd, 0, os.SEEK_SET)
+                msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
         except OSError:
             pass
         try:
